@@ -14,21 +14,6 @@ data "aws_subnet_ids" "default" {
   vpc_id = data.aws_vpc.default.id
 }
 
-data "aws_ami" "ubuntu" {
-  owners      = ["099720109477"] # Canonical
-  most_recent = true
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-*"]
-  }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
-}
-
 resource "aws_security_group" "instance" {
   name = "${var.cluster_name}-instance"
 
@@ -65,37 +50,22 @@ resource "aws_security_group_rule" "allow_all_outbound" {
 }
 
 data "template_file" "user_data" {
-  count = var.enable_new_user_data ? 0 : 1
-
   template = file("${path.module}/user-data.sh")
 
   vars = {
     server_port = var.server_port
     db_address  = data.terraform_remote_state.db.outputs.address
     db_port     = data.terraform_remote_state.db.outputs.port
-  }
-}
-
-data "template_file" "user_data_new" {
-  count = var.enable_new_user_data ? 1 : 0
-
-  template = file("${path.module}/user-data-new.sh")
-
-  vars = {
-    server_port = var.server_port
+    server_text = var.server_text
   }
 }
 
 resource "aws_launch_configuration" "example" {
-  image_id        = data.aws_ami.ubuntu.id
+  image_id        = var.ami
   instance_type   = var.instance_type
   security_groups = [aws_security_group.instance.id]
 
-  user_data = (
-    length(data.template_file.user_data[*]) > 0
-    ? data.template_file.user_data[0].rendered
-    : data.template_file.user_data_new[0].rendered
-  )
+  user_data = data.template_file.user_data.rendered
 
   lifecycle {
     create_before_destroy = true
@@ -103,14 +73,27 @@ resource "aws_launch_configuration" "example" {
 }
 
 resource "aws_autoscaling_group" "example" {
+  # Explicitly depend on the launch configuration's name so each time it is
+  # replaced this ASG is also replaced.
+  name = "${var.cluster_name}-${aws_launch_configuration.example.name}"
+
   launch_configuration = aws_launch_configuration.example.name
   vpc_zone_identifier  = data.aws_subnet_ids.default.ids
-
-  target_group_arns = [aws_lb_target_group.asg.arn]
-  health_check_type = "ELB"
+  target_group_arns    = [aws_lb_target_group.asg.arn]
+  health_check_type    = "ELB"
 
   min_size = var.min_size
   max_size = var.max_size
+
+  # Wait for at least this many instances to pass health checks before
+  # considering the ASG deployment complete.
+  min_elb_capacity = var.min_size
+
+  # When replacing this ASG, create the replacement first and only delete the
+  # original after.
+  lifecycle {
+    create_before_destroy = true
+  }
 
   tag {
     key                 = "Name"
