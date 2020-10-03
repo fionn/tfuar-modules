@@ -1,71 +1,12 @@
-locals {
-  http_port = 80
-  common_tags = {
-    Description = "tfuar-02",
-    Project     = "tfuar"
-  }
-}
-
-data "aws_vpc" "default" {
-  default = true
-}
-
-data "aws_subnet_ids" "default" {
-  vpc_id = data.aws_vpc.default.id
-}
-
-resource "aws_security_group" "instance" {
-  name = "${var.cluster_name}-instance"
-
-  ingress {
-    from_port   = var.server_port
-    to_port     = var.server_port
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-resource "aws_security_group" "alb" {
-  name = "${var.cluster_name}-alb"
-}
-
-resource "aws_security_group_rule" "allow_inbound_http" {
-  type              = "ingress"
-  security_group_id = aws_security_group.alb.id
-
-  from_port   = local.http_port
-  to_port     = local.http_port
-  protocol    = "tcp"
-  cidr_blocks = ["0.0.0.0/0"]
-}
-
-resource "aws_security_group_rule" "allow_all_outbound" {
-  type              = "egress"
-  security_group_id = aws_security_group.alb.id
-
-  from_port   = 0
-  to_port     = 0
-  protocol    = "-1"
-  cidr_blocks = ["0.0.0.0/0"]
-}
-
-data "template_file" "user_data" {
-  template = file("${path.module}/user-data.sh")
-
-  vars = {
-    server_port = var.server_port
-    db_address  = data.terraform_remote_state.db.outputs.address
-    db_port     = data.terraform_remote_state.db.outputs.port
-    server_text = var.server_text
-  }
+terraform {
+  required_version = "~> 0.13"
 }
 
 resource "aws_launch_configuration" "example" {
   image_id        = var.ami
   instance_type   = var.instance_type
   security_groups = [aws_security_group.instance.id]
-
-  user_data = data.template_file.user_data.rendered
+  user_data       = var.user_data
 
   lifecycle {
     create_before_destroy = true
@@ -78,9 +19,11 @@ resource "aws_autoscaling_group" "example" {
   name = "${var.cluster_name}-${aws_launch_configuration.example.name}"
 
   launch_configuration = aws_launch_configuration.example.name
-  vpc_zone_identifier  = data.aws_subnet_ids.default.ids
-  target_group_arns    = [aws_lb_target_group.asg.arn]
-  health_check_type    = "ELB"
+  vpc_zone_identifier  = var.subnet_ids
+
+  # Configure integrations with a load balancer.
+  target_group_arns = var.target_group_arns
+  health_check_type = var.health_check_type
 
   min_size = var.min_size
   max_size = var.max_size
@@ -134,62 +77,6 @@ resource "aws_autoscaling_schedule" "scale_in_at_night" {
   autoscaling_group_name = aws_autoscaling_group.example.name
 }
 
-resource "aws_lb" "example" {
-  name               = var.cluster_name
-  load_balancer_type = "application"
-  subnets            = data.aws_subnet_ids.default.ids
-  security_groups    = [aws_security_group.alb.id]
-}
-
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.example.arn
-  port              = local.http_port
-  protocol          = "HTTP"
-
-  default_action {
-    type = "fixed-response"
-
-    fixed_response {
-      content_type = "text/plain"
-      message_body = "404: page not found"
-      status_code  = 404
-    }
-  }
-}
-
-resource "aws_lb_listener_rule" "asg" {
-  listener_arn = aws_lb_listener.http.arn
-  priority     = 100
-
-  condition {
-    path_pattern {
-      values = ["*"]
-    }
-  }
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.asg.arn
-  }
-}
-
-resource "aws_lb_target_group" "asg" {
-  name     = var.cluster_name
-  port     = var.server_port
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
-
-  health_check {
-    path                = "/"
-    protocol            = "HTTP"
-    matcher             = "200"
-    interval            = 15
-    timeout             = 3
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-  }
-}
-
 resource "aws_cloudwatch_metric_alarm" "high_cpu_utilization" {
   alarm_name  = "${var.cluster_name}-high-cpu-utilization"
   namespace   = "AWS/EC2"
@@ -225,13 +112,13 @@ resource "aws_cloudwatch_metric_alarm" "low_cpu_credit_balance" {
   threshold           = 10
   unit                = "Count"
 }
+resource "aws_security_group" "instance" {
+  name = "${var.cluster_name}-instance"
 
-data "terraform_remote_state" "db" {
-  backend = "s3"
-
-  config = {
-    bucket = var.db_remote_state_bucket
-    key    = var.db_remote_state_key
-    region = "ap-northeast-1"
+  ingress {
+    from_port   = var.server_port
+    to_port     = var.server_port
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
 }
